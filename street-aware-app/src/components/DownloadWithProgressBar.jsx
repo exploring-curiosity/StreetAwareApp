@@ -1,13 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 
 export default function DownloadWithProgressBar() {
-  // State holds one entry per‐host:
-  // {
-  //   "192.168.0.184": { done: 0, total: 1, status: "pending", path: null },
-  //   "192.168.0.122": { done: 0, total: 1, status: "pending", path: null },
-  //   "192.168.0.108": { done: 0, total: 1, status: "pending", path: null },
-  //   "192.168.0.227": { done: 0, total: 1, status: "pending", path: null },
-  // }
   const [hosts, setHosts] = useState({
     "192.168.0.184": { done: 0, total: 1, status: "pending", path: null },
     "192.168.0.122": { done: 0, total: 1, status: "pending", path: null },
@@ -19,70 +12,86 @@ export default function DownloadWithProgressBar() {
   const [streamError, setStreamError] = useState(null);
   const esRef = useRef(null);
 
-  // Kick off download when button is clicked
   const startDownload = () => {
     if (streaming) return;
 
-    // Reset each host to pending
-    const initialHosts = {
+    // Reset all hosts to “pending”
+    setHosts({
       "192.168.0.184": { done: 0, total: 1, status: "pending", path: null },
       "192.168.0.122": { done: 0, total: 1, status: "pending", path: null },
       "192.168.0.108": { done: 0, total: 1, status: "pending", path: null },
       "192.168.0.227": { done: 0, total: 1, status: "pending", path: null },
-    };
-    setHosts(initialHosts);
+    });
     setStreaming(true);
     setStreamError(null);
 
-    // ◀️ Open SSE on /download-data (not /download-data/logs)
     const es = new EventSource("http://localhost:8000/download-data");
-
-    es.addEventListener("progress", (e) => {
-      try {
-        const { host, done, total } = JSON.parse(e.data);
-        setHosts((prev) => ({
-          ...prev,
-          [host]: { ...prev[host], done, total, status: "downloading" },
-        }));
-      } catch (err) {
-        console.error("Failed to parse progress event:", err);
+    es.onmessage = (e) => {
+      const line = e.data.trim();
+      // console.log("Received SSE:", line);
+      if (line.startsWith("PROGRESS ")) {
+        // Format: PROGRESS <host> <done> <total>
+        const parts = line.split(" ");
+        if (parts.length === 4) {
+          const host = parts[1];
+          const done = parseInt(parts[2], 10);
+          const total = parseInt(parts[3], 10);
+          setHosts((prev) => ({
+            ...prev,
+            [host]: {
+              ...prev[host],
+              done,
+              total,
+              status: "downloading",
+            },
+          }));
+        }
+      } else if (line.startsWith("COMPLETE ")) {
+        // Format: COMPLETE <host> <local_path>  OR  COMPLETE <host> ERROR
+        const parts = line.split(" ");
+        const host = parts[1];
+        const rest = parts.slice(2).join(" ");
+        if (rest === "ERROR") {
+          setHosts((prev) => ({
+            ...prev,
+            [host]: {
+              ...prev[host],
+              status: "error",
+            },
+          }));
+        } else {
+          setHosts((prev) => ({
+            ...prev,
+            [host]: {
+              ...prev[host],
+              status: "downloaded",
+              path: rest,
+            },
+          }));
+        }
+      } else if (line.startsWith("SUMMARY ")) {
+        // Format: SUMMARY <json>
+        const rawJson = line.slice("SUMMARY ".length);
+        try {
+          const summary = JSON.parse(rawJson);
+          setHosts(summary);
+        } catch {
+          // ignore parse errors
+        }
+        // Close the stream and mark not streaming
+        es.close();
+        esRef.current = null;
+        setStreaming(false);
       }
-    });
-
-    es.addEventListener("complete", (e) => {
-      try {
-        const { host, status, path } = JSON.parse(e.data);
-        setHosts((prev) => ({
-          ...prev,
-          [host]: {
-            ...prev[host],
-            status, // "downloaded" or "error"
-            path: status === "downloaded" ? path : null,
-          },
-        }));
-      } catch (err) {
-        console.error("Failed to parse complete event:", err);
-      }
-    });
-
-    es.addEventListener("end", (e) => {
-      try {
-        const summary = JSON.parse(e.data);
-        setHosts(summary);
-      } catch {
-        // ignore parse failures
-      }
-      es.close();
-      esRef.current = null;
-      setStreaming(false);
-    });
+      // Any other lines you can ignore or log if you like
+    };
 
     es.onerror = (err) => {
-      console.error("SSE stream error:", err);
+      console.error("SSE error:", err);
       es.close();
+      esRef.current = null;
       setStreaming(false);
       setStreamError("Connection lost or server error");
-      esRef.current = null;
     };
 
     esRef.current = es;
@@ -96,7 +105,7 @@ export default function DownloadWithProgressBar() {
     setStreaming(false);
   };
 
-  // Cleanup on component unmount
+  // Make sure to clean up if component unmounts
   useEffect(() => {
     return () => {
       if (esRef.current) {
@@ -106,11 +115,13 @@ export default function DownloadWithProgressBar() {
     };
   }, []);
 
-  // Render one row (progress bar + status) for a given host
+  // Helper to render each host’s progress bar + status
   const renderHostRow = (host, data) => {
     const { done, total, status, path } = data;
     const percent =
-      total && status === "downloading" ? Math.floor((done / total) * 100) : 0;
+      total && status === "downloading"
+        ? Math.floor((done / total) * 100)
+        : 0;
 
     let statusDisplay;
     switch (status) {
@@ -141,14 +152,21 @@ export default function DownloadWithProgressBar() {
         }}
       >
         <div style={{ fontWeight: "bold" }}>{host}</div>
-        <div style={{ height: "12px", background: "#eee", borderRadius: 6 }}>
+        <div
+          style={{
+            height: "12px",
+            background: "#eee",
+            borderRadius: 6,
+            overflow: "hidden",
+          }}
+        >
           {status === "downloading" && (
             <div
               style={{
                 width: `${percent}%`,
                 height: "100%",
                 background: "#4caf50",
-                borderRadius: 6,
+                transition: "width 0.2s",
               }}
             />
           )}
@@ -164,7 +182,13 @@ export default function DownloadWithProgressBar() {
   };
 
   return (
-    <div style={{ fontFamily: "Arial, sans-serif", maxWidth: 800, margin: "1rem auto" }}>
+    <div
+      style={{
+        fontFamily: "Arial, sans-serif",
+        maxWidth: 800,
+        margin: "1rem auto",
+      }}
+    >
       <button
         onClick={startDownload}
         disabled={streaming}
@@ -201,7 +225,9 @@ export default function DownloadWithProgressBar() {
       )}
 
       <div style={{ marginTop: "1rem" }}>
-        {Object.entries(hosts).map(([host, data]) => renderHostRow(host, data))}
+        {Object.entries(hosts).map(([host, data]) =>
+          renderHostRow(host, data)
+        )}
       </div>
     </div>
   );

@@ -146,42 +146,47 @@ def _terminate_download():
 def cleanup_download():
     _terminate_download()
 
+async def run_download_script():
+    global current_download_proc
+    # Spawn data_download.py with -u (unbuffered), so every print(..., flush=True) shows up immediately
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "-u", DATA_SCRIPT,
+        cwd=os.path.dirname(DATA_SCRIPT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    current_download_proc = proc
+
+    try:
+        # Read each line as it comes, emit as “data: <line>\n\n”
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            yield raw.decode(errors="replace").rstrip()
+    finally:
+        await proc.wait()
+        current_download_proc = None
+
 @app.get("/download-data")
 async def download_data_sse():
     """
     SSE endpoint that streams each stdout line from data_download.py as soon as it appears.
     React should use `onmessage` to receive these lines and `addEventListener("end")` to know when to close.
     """
+
+
     if not os.path.isfile(DATA_SCRIPT):
         raise HTTPException(status_code=500, detail="data_download.py not found")
-
+    
     async def event_generator():
-        global current_download_proc
-        # Spawn data_download.py with -u (unbuffered), so every print(..., flush=True) shows up immediately
-        proc = await asyncio.create_subprocess_exec(
-            "python3", "-u", DATA_SCRIPT,
-            cwd=os.path.dirname(DATA_SCRIPT),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        current_download_proc = proc
+        # stream log data
+        async for log_line in run_download_script():
+            yield f"{log_line}\n\n"
 
-        try:
-            # Read each line as it comes, emit as “data: <line>\n\n”
-            while True:
-                raw = await proc.stdout.readline()
-                if not raw:
-                    break
-                line = raw.decode(errors="replace").rstrip()
-                yield f"data: {line}\n\n"
-
-            # Once the script has exited, tell the client “end” so React can close()
-            yield "event: end\n"
-            yield "data:\n\n"
-        finally:
-            await proc.wait()
-            if current_download_proc == proc:
-                current_download_proc = None
+        # signal the client we’re done
+        yield "event: end\n"
+        yield "data:\n\n"
 
     return EventSourceResponse(
         event_generator(),
