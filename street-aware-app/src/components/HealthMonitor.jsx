@@ -16,7 +16,7 @@ export default function HealthMonitor() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch("http://localhost:8000/health");
+        const res = await fetch("http://localhost:8080/health");
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }

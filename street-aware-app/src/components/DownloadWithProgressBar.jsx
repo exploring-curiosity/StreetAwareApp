@@ -25,7 +25,7 @@ export default function DownloadWithProgressBar() {
     setStreaming(true);
     setStreamError(null);
 
-    const es = new EventSource("http://localhost:8000/download-data");
+    const es = new EventSource("http://localhost:8080/download-data");
     es.onmessage = (e) => {
       const line = e.data.trim();
       // console.log("Received SSE:", line);

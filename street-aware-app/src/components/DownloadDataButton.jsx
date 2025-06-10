@@ -12,7 +12,7 @@ export default function DownloadDataButton() {
     setError(null);
 
     try {
-      const resp = await fetch("http://localhost:8000/download-data", {
+      const resp = await fetch("http://localhost:8080/download-data", {
         method: "POST",
       });
       if (!resp.ok) {
