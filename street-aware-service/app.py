@@ -2,21 +2,23 @@
 
 import os
 import asyncio
+import json
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:4000"],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 # Relative path to your SSH script
-SCRIPT_PATH = os.path.normpath("../StreetAwareScripts/ssh_multiple_run_script.py")
+SCRIPT_PATH = os.path.normpath("../street-aware-scripts/ssh_multiple_run_script.py")
 
 # Holds the currently running subprocess
 current_proc = None
@@ -94,11 +96,121 @@ def stop_script():
         return {"status": "stopping"}
     raise HTTPException(status_code=404, detail="No active process to stop")
 
+HEALTH_SCRIPT = os.path.normpath("../street-aware-scripts/health_check.py")
+
+@app.get("/health")
+async def get_health_status():
+    """
+    Runs the health_check.py script as a subprocess, captures its stdout,
+    parses JSON, and returns it. If it fails, returns 500.
+    """
+    if not os.path.isfile(HEALTH_SCRIPT):
+        raise HTTPException(status_code=500, detail="health_check.py not found")
+
+    # Run the script in its own directory to ensure imports and paths work
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "-u", HEALTH_SCRIPT,
+        cwd=os.path.dirname(HEALTH_SCRIPT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        # Include stderr in the error response for debugging
+        raise HTTPException(
+            status_code=500,
+            detail=f"health_check failed: {stderr.decode(errors='ignore')}"
+        )
+
+    try:
+        statuses = json.loads(stdout.decode())
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid JSON from health_check: {e}"
+        )
+
+    return JSONResponse(statuses)
+
+
+DATA_SCRIPT = os.path.normpath("../street-aware-scripts/data_download.py")
+current_download_proc = None
+
+def _terminate_download():
+    global current_download_proc
+    if current_download_proc and current_download_proc.returncode is None:
+        current_download_proc.kill()
+        current_download_proc = None
+
+@app.on_event("shutdown")
+def cleanup_download():
+    _terminate_download()
+
+async def run_download_script():
+    global current_download_proc
+    # Spawn data_download.py with -u (unbuffered), so every print(..., flush=True) shows up immediately
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "-u", DATA_SCRIPT,
+        cwd=os.path.dirname(DATA_SCRIPT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    current_download_proc = proc
+
+    try:
+        # Read each line as it comes, emit as “data: <line>\n\n”
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            yield raw.decode(errors="replace").rstrip()
+    finally:
+        await proc.wait()
+        current_download_proc = None
+
+@app.get("/download-data")
+async def download_data_sse():
+    """
+    SSE endpoint that streams each stdout line from data_download.py as soon as it appears.
+    React should use `onmessage` to receive these lines and `addEventListener("end")` to know when to close.
+    """
+
+
+    if not os.path.isfile(DATA_SCRIPT):
+        raise HTTPException(status_code=500, detail="data_download.py not found")
+    
+    async def event_generator():
+        # stream log data
+        async for log_line in run_download_script():
+            yield f"{log_line}\n\n"
+
+        # signal the client we’re done
+        yield "event: end\n"
+        yield "data:\n\n"
+
+    return EventSourceResponse(
+        event_generator(),
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+@app.post("/download-data/stop")
+def stop_download():
+    """
+    Optionally allow the UI to kill the download early. React can POST here.
+    """
+    if current_download_proc and current_download_proc.returncode is None:
+        _terminate_download()
+        return {"status": "stopping"}
+    raise HTTPException(status_code=404, detail="No active download to stop")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
-        port=8000,
+        port=8080,
         reload=False
     )

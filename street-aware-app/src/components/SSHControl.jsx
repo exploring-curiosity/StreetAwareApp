@@ -19,7 +19,7 @@ export default function SSHControl() {
     setPanelOpen(true);
 
     const es = new EventSource(
-      `http://localhost:8000/start-ssh/logs?timeout=${timeoutSec}`
+      `http://localhost:8080/start-ssh/logs?timeout=${timeoutSec}`
     );
 
     es.onmessage = (e) => {
@@ -52,7 +52,7 @@ export default function SSHControl() {
   const stopJob = async () => {
     if (!running) return;
     try {
-      await fetch("http://localhost:8000/start-ssh/stop", {
+      await fetch("http://localhost:8080/start-ssh/stop", {
         method: "POST",
       });
     } catch (err) {
